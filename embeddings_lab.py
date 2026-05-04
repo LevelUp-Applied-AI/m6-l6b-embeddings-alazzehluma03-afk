@@ -7,6 +7,7 @@ DistilBERT — on the BBC News corpus (5 categories).
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine
 
@@ -16,7 +17,9 @@ def build_tfidf(texts):
 
     Returns (tfidf_matrix, vectorizer).
     """
-    pass
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(texts)
+    return tfidf_matrix, vectorizer
 
 
 def compute_tfidf_similarity(tfidf_matrix):
@@ -24,7 +27,8 @@ def compute_tfidf_similarity(tfidf_matrix):
 
     Returns a numpy array of shape (n, n).
     """
-    pass
+    similarity_matrix = sklearn_cosine(tfidf_matrix)
+    return similarity_matrix
 
 
 def load_glove(filepath):
@@ -32,7 +36,14 @@ def load_glove(filepath):
 
     Returns a dict mapping each word to a numpy array.
     """
-    pass
+    embedding = {}
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            values = line.strip().split()
+            word = values[0]
+            vector = np.array(values[1:], dtype=np.float32)
+            embedding[word] = vector
+    return embedding
 
 
 def text_to_glove(text, embeddings):
@@ -41,15 +52,43 @@ def text_to_glove(text, embeddings):
     Skip out-of-vocabulary words. If every word is OOV, return a zero
     vector of shape (50,).
     """
-    pass
-
+    words = text.lower().split()
+    
+    vectors = []
+    for word in words:
+        if word in embeddings:
+            vectors.append(embeddings[word])
+    if len(vectors) == 0:
+        return np.zeros(50)
+    
+    return np.mean(vectors, axis=0)
 
 def extract_bert_embedding(text, tokenizer, model):
     """Extract a sentence embedding from DistilBERT.
 
     Returns a numpy array of shape (768,).
     """
-    pass
+    inputs = tokenizer(
+        text ,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+        padding=True
+    )
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    last_hidden_state = outputs.last_hidden_state  # (1, seq_len, 768)
+    attention_mask = inputs["attention_mask"]      # (1, seq_len)
+    
+    mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+    summed = (last_hidden_state * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1e-9)  # FIXED
+    
+    embedding = summed / counts
+
+    return embedding.squeeze().cpu().numpy()
+    
 
 
 def compare_similarities(texts, queries, tfidf_sim, glove_embeddings,
@@ -63,8 +102,54 @@ def compare_similarities(texts, queries, tfidf_sim, glove_embeddings,
                       "glove": [(text, score), ...],
                       "bert":  [(text, score), ...]}}
     """
-    pass
+    results = {}
 
+    glove_matrix = np.array([text_to_glove(t, glove_embeddings) for t in texts])
+    
+    bert_matrix = np.array([
+        extract_bert_embedding(t, bert_tokenizer, bert_model) 
+        for t in texts
+    ])  # FIXED
+
+    for query in queries:
+        q_idx = texts.index(query)
+
+        # TF-IDF 
+        tfidf_scores = tfidf_sim[q_idx]
+
+        tfidf_top_idx = np.argsort(tfidf_scores)[::-1]
+        tfidf_top = [
+            (texts[i], tfidf_scores[i])
+            for i in tfidf_top_idx if i != q_idx
+        ][:3]
+
+        # GloVe 
+        q_glove = text_to_glove(query, glove_embeddings).reshape(1, -1)
+        glove_scores = sklearn_cosine(q_glove, glove_matrix)[0]
+
+        glove_top_idx = np.argsort(glove_scores)[::-1]
+        glove_top = [
+            (texts[i], glove_scores[i])
+            for i in glove_top_idx if i != q_idx
+        ][:3]
+
+        # BERT 
+        q_bert = extract_bert_embedding(query, bert_tokenizer, bert_model).reshape(1, -1)
+        bert_scores = sklearn_cosine(q_bert, bert_matrix)[0]
+
+        bert_top_idx = np.argsort(bert_scores)[::-1]
+        bert_top = [
+            (texts[i], bert_scores[i])
+            for i in bert_top_idx if i != q_idx
+        ][:3]
+
+        results[query] = {
+            "tfidf": tfidf_top,
+            "glove": glove_top,
+            "bert": bert_top
+        }
+
+    return results
 
 if __name__ == "__main__":
     import torch
